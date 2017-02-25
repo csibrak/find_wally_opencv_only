@@ -1,282 +1,114 @@
-/*
- * Copyright (C) 2016 iCub Facility - Istituto Italiano di Tecnologia
- * Author: Vadim Tikhanoff
- * email:  vadim.tikhanoff@iit.it
- * Permission is granted to copy, distribute, and/or modify this program
- * under the terms of the GNU General Public License, version 2 or any
- * later version published by the Free Software Foundation.
- *
- * A copy of the license can be found at
- * http://www.robotcub.org/icub/license/gpl.txt
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General
- * Public License for more details
-*/
+/**
+ * @file MatchTemplate_Demo.cpp
+ * @brief Sample code to use the function MatchTemplate
+ * @author OpenCV team
+ */
 
-#include <yarp/os/BufferedPort.h>
-#include <yarp/os/ResourceFinder.h>
-#include <yarp/os/RFModule.h>
-#include <yarp/os/Network.h>
-#include <yarp/os/Log.h>
-#include <yarp/os/LogStream.h>
-#include <yarp/os/Mutex.h>
-#include <yarp/sig/Image.h>
+#include "opencv2/imgcodecs.hpp"
+#include "opencv2/highgui.hpp"
+#include "opencv2/imgproc.hpp"
+#include <iostream>
 
-#include <opencv2/core/core.hpp>
-#include <opencv2/opencv.hpp>
-#include <opencv2/ximgproc/slic.hpp>
+using namespace std;
+using namespace cv;
 
-#include "findWally_IDL.h"
+/// Global Variables
+bool use_mask;
+Mat img; Mat templ; Mat mask; Mat result;
+const char* image_window = "Source Image";
+const char* result_window = "Result window";
 
-/********************************************************/
-class Finder : public yarp::os::RFModule,
-                public findWally_IDL
+int match_method;
+int max_Trackbar = 5;
+
+/// Function Headers
+void MatchingMethod( int, void* );
+
+/**
+ * @function main
+ */
+int main( int argc, char** argv )
 {
-    yarp::os::ResourceFinder *rf;
-    yarp::os::RpcServer rpcPort;
-    yarp::os::BufferedPort<yarp::sig::ImageOf<yarp::sig::PixelRgb> >    imageOutPort;
+  if (argc < 3)
+  {
+    cout << "Not enough parameters" << endl;
+    cout << "Usage:\n./MatchTemplate_Demo <image_name> <template_name> [<mask_name>]" << endl;
+    return -1;
+  }
 
-    std::string outImgPortName;
+  /// Load image and template
+  img = imread( argv[1], IMREAD_COLOR );
+  templ = imread( argv[2], IMREAD_COLOR );
 
-    yarp::os::Mutex mutex;
+  if(argc > 3) {
+    use_mask = true;
+    mask = imread( argv[3], IMREAD_COLOR );
+  }
 
-    cv::Mat inputImage;
-    cv::Mat templateImage;
-    cv::Mat out_image;
+  if(img.empty() || templ.empty() || (use_mask && mask.empty()))
+  {
+    cout << "Can't read one of the images" << endl;
+    return -1;
+  }
 
-    double x_pos, y_pos;
+  /// Create windows
+  namedWindow( image_window, WINDOW_AUTOSIZE );
+  namedWindow( result_window, WINDOW_AUTOSIZE );
 
-    bool closing;
+  /// Create Trackbar
+  const char* trackbar_label = "Method: \n 0: SQDIFF \n 1: SQDIFF NORMED \n 2: TM CCORR \n 3: TM CCORR NORMED \n 4: TM COEFF \n 5: TM COEFF NORMED";
+  createTrackbar( trackbar_label, image_window, &match_method, max_Trackbar, MatchingMethod );
 
-    /********************************************************/
-    bool attach(yarp::os::RpcServer &source)
-    {
-        return this->yarp().attachAsServer(source);
-    }
+  MatchingMethod( 0, 0 );
 
-    /********************************************************/
-    bool load(const std::string &image)
-    {
-        mutex.lock();
-        yarp::os::ResourceFinder rf;
-        rf.setVerbose();
-        rf.setDefaultContext(this->rf->getContext().c_str());
+  waitKey(0);
+  return 0;
+}
 
-        std::string imageStr = rf.findFile(image.c_str());
-
-        yDebug() << "image path is:" << imageStr;
-
-        inputImage = cv::imread(imageStr, CV_LOAD_IMAGE_COLOR);
-        if(! inputImage.data )
-        {
-            yError() <<"Could not open or find the first image " << imageStr;
-            mutex.unlock();
-            return false;
-        }
-
-        x_pos = -1.0;
-        y_pos = -1.0;
-
-        mutex.unlock();
-
-        return true;
-    }
-
-    /********************************************************/
-    yarp::os::Bottle templateMatch (const std::string &image, const int method)
-    {
-        yarp::os::Bottle pos;
-
-        mutex.lock();
-        yarp::os::ResourceFinder rf;
-        rf.setVerbose();
-        rf.setDefaultContext(this->rf->getContext().c_str());
-        std::string imageStr = rf.findFile(image.c_str());
-
-        yDebug() << "image path is:" << imageStr;
-
-        templateImage = cv::imread(imageStr, CV_LOAD_IMAGE_COLOR);
-
-        if(! templateImage.data || ! inputImage.data || method < 0 || method > 5 )
-        {
-            yError("Either there is no main image, the template is invalid or the method requested is wrong");
-            x_pos = -1.0;
-            y_pos = -1.0;
-            pos.addDouble(x_pos);
-            pos.addDouble(y_pos);
-        }
-        else
-        {
-            cv::Mat result;
-            int result_cols =  inputImage.cols - templateImage.cols + 1;
-            int result_rows = inputImage.rows - templateImage.rows + 1;
-
-            //create the resulting image in grayscale
-            result.create( result_rows, result_cols, CV_32FC1 );
-
-            //Check requested template tracking method and call function
-            if (method == cv::TM_SQDIFF || method == cv::TM_CCORR_NORMED)
-            {
-                cv::Mat mask;
-                matchTemplate( inputImage, templateImage, result, method, mask);
-            }
-            else
-                matchTemplate( inputImage, templateImage, result, method);
-
-            //Normalizes the norm
-            normalize( result, result, 0, 1, cv::NORM_MINMAX, -1, cv::Mat() );
-
-            double minVal; double maxVal; cv::Point minLoc; cv::Point maxLoc;
-            cv::Point matchLoc;
-
-            //Find minimum value and maximum value and get the location in 2D point
-            minMaxLoc( result, &minVal, &maxVal, &minLoc, &maxLoc, cv::Mat() );
-
-            if( method  == cv::TM_SQDIFF || method == cv::TM_SQDIFF_NORMED )
-            {
-                matchLoc = minLoc;
-            }
-            else
-                matchLoc = maxLoc;
-
-            //Use the previous location to fill in the bottle
-            x_pos = matchLoc.x;
-            y_pos = matchLoc.y;
-            pos.addDouble(x_pos);
-            pos.addDouble(y_pos);
-        }
-
-        mutex.unlock();
-
-        return pos;
-    }
-
-    /********************************************************/
-    yarp::os::Bottle getLocation()
-    {
-        mutex.lock();
-        yarp::os::Bottle position;
-        position.clear();
-        position.addDouble(x_pos);
-        position.addDouble(y_pos);
-        mutex.unlock();
-
-        return position;
-    }
-
-    /********************************************************/
-    bool quit()
-    {
-        closing = true;
-        return true;
-    }
-
-    public:
-    /********************************************************/
-    bool configure(yarp::os::ResourceFinder &rf)
-    {
-        this->rf=&rf;
-
-        std::string moduleName = rf.check("name", yarp::os::Value("find-wally"), "module name (string)").asString();
-        setName(moduleName.c_str());
-
-        rpcPort.open(("/"+getName("/rpc")).c_str());
-        imageOutPort.open(("/"+getName("/image:o")).c_str());
-
-        y_pos = -1.0;
-        x_pos = -1.0;
-
-        closing = false;
-
-        attach(rpcPort);
-        return true;
-    }
-
-    /********************************************************/
-    bool close()
-    {
-        mutex.lock();
-        rpcPort.close();
-        imageOutPort.close();
-        mutex.unlock();
-
-        return true;
-    }
-
-    /********************************************************/
-    double getPeriod()
-    {
-        return 1.0;
-    }
-
-    /********************************************************/
-    bool updateModule()
-    {
-        mutex.lock();
-        yarp::sig::ImageOf<yarp::sig::PixelRgb> &outImg  = imageOutPort.prepare();
-
-        if( inputImage.data)
-        {
-            out_image = inputImage.clone();
-
-            if (x_pos > 0.0 && y_pos > 0.0)
-            {
-                cv::namedWindow("holahola");
-                using namespace cv;
-                using namespace cv::ximgproc;
-
-                Ptr<SuperpixelSLIC> superpixel = createSuperpixelSLIC(out_image);
-                superpixel->iterate(10);
-                cv::Mat labelcountours;
-                superpixel->getLabelContourMask(labelcountours);
-
-                //cv::circle(out_image, cv::Point(x_pos, y_pos), 5, cv::Scalar(0.5, 0.5, 0.0), 2);
-                cv::Rect roi(x_pos, y_pos, templateImage.cols, templateImage.rows);
-
-                cv::drawContours(out_image, labelcountours, -1, cv::Scalar(0, 255, 0));
-                //out_image.setTo(cv::Scalar(0,255,0), labelcountours);
-                //inputImage.copyTo(
-//                cv::rectangle(out_image, roi, cv::Scalar(0, 255, 0), 4);
-                cv::imshow("holahola", labelcountours);
-                cv::waitKey(0);
-            }
-
-            cvtColor(out_image, out_image, CV_BGR2RGB);
-
-            IplImage yarpImg = out_image;
-            outImg.resize(yarpImg.width, yarpImg.height);
-            cvCopy( &yarpImg, (IplImage *) outImg.getIplImage());
-
-            imageOutPort.write();
-        }
-        mutex.unlock();
-
-        return !closing;
-    }
-};
-
-/********************************************************/
-int main(int argc, char *argv[])
+/**
+ * @function MatchingMethod
+ * @brief Trackbar callback
+ */
+void MatchingMethod( int, void* )
 {
-    yarp::os::Network::init();
+  /// Source image to display
+  Mat img_display;
+  img.copyTo( img_display );
 
-    yarp::os::Network yarp;
-    if (!yarp.checkNetwork())
-    {
-        yError()<<"YARP server not available!";
-        return 1;
-    }
+  /// Create the result matrix
+  int result_cols =  img.cols - templ.cols + 1;
+  int result_rows = img.rows - templ.rows + 1;
 
-    Finder module;
-    yarp::os::ResourceFinder rf;
+  result.create( result_rows, result_cols, CV_32FC1 );
 
-    rf.setVerbose();
-    rf.setDefaultConfigFile( "config.ini" );
-    rf.setDefaultContext("find-wally");
+  /// Do the Matching and Normalize
+  bool method_accepts_mask = (CV_TM_SQDIFF == match_method || match_method == CV_TM_CCORR_NORMED);
+  if (use_mask && method_accepts_mask)
+    { matchTemplate( img, templ, result, match_method, mask); }
+  else
+    { matchTemplate( img, templ, result, match_method); }
 
-    rf.configure(argc,argv);
+  normalize( result, result, 0, 1, NORM_MINMAX, -1, Mat() );
 
-    return module.runModule(rf);
+  /// Localizing the best match with minMaxLoc
+  double minVal; double maxVal; Point minLoc; Point maxLoc;
+  Point matchLoc;
+
+  minMaxLoc( result, &minVal, &maxVal, &minLoc, &maxLoc, Mat() );
+
+
+  /// For SQDIFF and SQDIFF_NORMED, the best matches are lower values. For all the other methods, the higher the better
+  if( match_method  == TM_SQDIFF || match_method == TM_SQDIFF_NORMED )
+    { matchLoc = minLoc; }
+  else
+    { matchLoc = maxLoc; }
+
+  /// Show me what you got
+  rectangle( img_display, matchLoc, Point( matchLoc.x + templ.cols , matchLoc.y + templ.rows ), Scalar::all(0), 2, 8, 0 );
+  rectangle( result, matchLoc, Point( matchLoc.x + templ.cols , matchLoc.y + templ.rows ), Scalar::all(0), 2, 8, 0 );
+
+  imshow( image_window, img_display );
+  imshow( result_window, result );
+
+  return;
 }
